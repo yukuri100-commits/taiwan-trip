@@ -55,7 +55,7 @@ const calculateDistance = (lat1: number, lon1: number, lat2: number, lon2: numbe
 };
 
 
-type TripStep = { from: string; to: string; transport: string; distance: number; carbon: number; hours: number };
+type TripStep = { from: string; to: string; transport: string; distance: number; carbon: number; hours: number; routeName?: string; routeWarning?: string };
 type GeoPoint = [number, number];
 const ROUTE_COLORS = ["#2563eb", "#c2410c", "#7c3aed", "#047857"];
 const VEHICLES: Record<string, string> = { plane: "✈️", ferry: "⛴️", car: "🚗", bus: "🚌", train: "🚆", hsr: "🚄", bike: "🚲", foot: "🚶" };
@@ -75,10 +75,54 @@ const CORRIDOR: GeoPoint[] = [
 ];
 const pointDistance = (a: GeoPoint, b: GeoPoint) =>
   Math.hypot((a[0]-b[0]), (a[1]-b[1])*Math.cos((a[0]+b[0])*Math.PI/360));
+
+type RouteProfile = { path: GeoPoint[]; name: string; warning?: string; carSpeed?: number; busSpeed?: number; distanceFactor?: number };
+const cityPoint=(name:string):GeoPoint=>[CITIES[name].lat,CITIES[name].lng];
+const samePair=(a:string,b:string,x:string,y:string)=>(a===x&&b===y)||(a===y&&b===x);
+const orient=(from:string,forwardFrom:string,path:GeoPoint[])=>from===forwardFrom?path:[...path].reverse();
+
+// Fixed classroom corridors: geographic illustrations, not live navigation.
+// Only cars and buses use the major cross-island road corridors. Rail stays on
+// the perimeter railway, while walking and cycling never enter freeways.
+function specialRoadProfile(from:string,to:string,transport:string):RouteProfile|null {
+  if(transport!=="car"&&transport!=="bus")return null;
+  if(samePair(from,to,"Taipei","Yilan")){
+    const path=[cityPoint("Taipei"),[25.05,121.61],[24.99,121.65],[24.94,121.71],[24.86,121.82],cityPoint("Yilan")] as GeoPoint[];
+    return {path:orient(from,"Taipei",path),name:"National Freeway 5 · Snow Mountain Tunnel",carSpeed:70,busSpeed:55,distanceFactor:1.06};
+  }
+  if(samePair(from,to,"Taoyuan","Yilan")){
+    const path=[cityPoint("Taoyuan"),[24.88,121.29],[24.68,121.38],[24.65,121.47],[24.75,121.80],cityPoint("Yilan")] as GeoPoint[];
+    return {path:orient(from,"Taoyuan",path),name:"Northern Cross-Island Highway · Hwy 7",warning:"Mountain road · Check road conditions. 山區道路，行前須查詢路況。",carSpeed:35,busSpeed:30,distanceFactor:1.1};
+  }
+  if(samePair(from,to,"Taichung","Hualien")){
+    const path=[cityPoint("Taichung"),[23.97,120.97],[24.02,121.13],[24.14,121.28],[24.18,121.31],[24.18,121.49],[24.16,121.62],cityPoint("Hualien")] as GeoPoint[];
+    return {path:orient(from,"Taichung",path),name:"Central Mountain Route · Hwy 8 / Hwy 14A / Freeway 6",warning:"Mountain controls and road conditions may change. 山區管制與路況可能變動。",carSpeed:35,busSpeed:30,distanceFactor:1.1};
+  }
+  if(to==="Taitung"&&["Pingtung","Kaohsiung","Tainan"].includes(from)||from==="Taitung"&&["Pingtung","Kaohsiung","Tainan"].includes(to)){
+    const west=from==="Taitung"?to:from;
+    const prefix:GeoPoint[]=west==="Tainan"?[cityPoint("Tainan"),[22.80,120.30],cityPoint("Pingtung")]:west==="Kaohsiung"?[cityPoint("Kaohsiung"),cityPoint("Pingtung")]:[cityPoint("Pingtung")];
+    const path=[...prefix,[22.36,120.63],[22.24,120.72],[22.23,120.86],[22.36,120.94],[22.58,121.01],cityPoint("Taitung")] as GeoPoint[];
+    return {path:from===west?path:[...path].reverse(),name:"South-Link Highway · Hwy 9",carSpeed:50,busSpeed:40,distanceFactor:1.08};
+  }
+  return null;
+}
+
+function routeProfile(from:string,to:string,transport:string):RouteProfile|null {
+  const special=specialRoadProfile(from,to,transport);
+  if(special)return special;
+  if(transport==="plane")return {path:[cityPoint(from),cityPoint(to)],name:"Air route",distanceFactor:1};
+  if(transport==="hsr")return {path:[],name:"Taiwan High Speed Rail",distanceFactor:1.08};
+  if(transport==="train")return {path:[],name:"Taiwan Rail",distanceFactor:1.1};
+  if(transport==="car"||transport==="bus")return {path:[],name:"Main road route",distanceFactor:1.12};
+  if(transport==="bike")return {path:[],name:"Cycling route",distanceFactor:1.12};
+  if(transport==="foot")return {path:[],name:"Walking route",distanceFactor:1.12};
+  return null;
+}
 function illustrativePath(step: TripStep): GeoPoint[] {
   const a = CITIES[step.from], b = CITIES[step.to];
   const start: GeoPoint = [a.lat,a.lng], end: GeoPoint = [b.lat,b.lng];
-  if (step.transport === "plane") return [start,end];
+  const profile=routeProfile(step.from,step.to,step.transport);
+  if(profile?.path.length)return profile.path;
   if (step.transport === "ferry") {
     const mainland = a.island ? step.to : step.from;
     const sea: GeoPoint[] = mainland === "Chiayi"
@@ -154,16 +198,18 @@ function routeEstimate(from:string,to:string,transport:string) {
   }
   const path=illustrativePath({from,to,transport,distance:0,carbon:0,hours:0});
   const length=(p:GeoPoint[])=>p.slice(1).reduce((sum,q,i)=>sum+calculateDistance(...p[i],...q),0);
-  const distance=Math.max(1,Math.round(length(path)*(["plane","ferry"].includes(transport)?1:1.12)));
+  const profile=routeProfile(from,to,transport);
+  const distance=Math.max(1,Math.round(length(path)*(transport==="ferry"?1:profile?.distanceFactor??1.12)));
   const speed:Record<string,number>={foot:4,bike:12,car:60,bus:45,train:70,hsr:180,plane:450,ferry:35};
   const overhead:Record<string,number>={foot:0,bike:0,car:0.25,bus:0.5,train:0.5,hsr:0.75,plane:1.5,ferry:1};
-  const hours=transport==="ferry" ? FERRY_HOURS[pair(from,to)]??99 : distance/speed[transport]+overhead[transport];
+  const corridorSpeed=transport==="car"?profile?.carSpeed:transport==="bus"?profile?.busSpeed:undefined;
+  const hours=transport==="ferry" ? FERRY_HOURS[pair(from,to)]??99 : distance/(corridorSpeed??speed[transport])+overhead[transport];
   if(!reason && transport==="foot" && distance>30) reason="Too far to walk in our day trip (30 km max). 一日步行上限 30 公里。";
   if(!reason && transport==="bike" && distance>80) reason="Too far to cycle in our day trip (80 km max). 一日騎車上限 80 公里。";
   if(!reason && hours>MAX_LEG_HOURS && !isMatsuFerry(from,to,transport))reason="Too long for this day. 這段超過每日 8 小時交通上限。";
   const transferKm=transport==="ferry" ? length(a.island?path.slice(-2):path.slice(0,2)) : 0;
   const carbon=Math.round(Math.max(0,distance-transferKm)*TRANSPORT_DATA[transport].value+transferKm*TRANSPORT_DATA.bus.value);
-  return {disabled:!!reason,reason,distance,hours,carbon};
+  return {disabled:!!reason,reason,distance,hours,carbon,routeName:transport==="ferry"?"Ferry and port transfer":profile?.name??"Illustrative route",routeWarning:profile?.warning??""};
 }
 const hoursText=(n:number)=>Math.round(n*60/5)*5<60
   ? Math.round(n*60/5)*5+" min"
@@ -442,11 +488,15 @@ function TripMap({steps,teamName}:{steps:TripStep[];teamName:string}) {
     <div className="rounded-xl bg-white border-l-8 p-4" style={{borderColor:ROUTE_COLORS[leg]}}>
       <p className="font-black text-lg text-blue-800" aria-live="polite">{clock>=duration?"✓ Trip Complete!":arrived?"✓ Arrived in "+steps[leg].to:"Day "+(leg+1)+" · "+steps[leg].from+" → "+steps[leg].to}</p>
       <p className="text-xl font-bold mt-2">{VEHICLES[steps[leg].transport]} {sentence(leg)}</p>
+      {steps[leg].routeName&&<p className="text-sm font-bold text-indigo-700 mt-1">🛣️ {steps[leg].routeName}</p>}
+      {steps[leg].routeWarning&&<p className="text-sm font-bold text-amber-700 mt-1">⚠ {steps[leg].routeWarning}</p>}
     </div>
     <div className="grid grid-cols-1 sm:grid-cols-2 gap-3">
       {steps.map((step,i)=><button key={i} onClick={()=>{setPlaying(false);setClock(i*6);}} className={buttonStyle+" text-left"} style={{borderColor:ROUTE_COLORS[i]}}>
         <p>Day {i+1} · {VEHICLES[step.transport]} {step.from} → {step.to}</p>
         <p className="text-sm mt-1">{isMatsuFerry(step.from,step.to,step.transport)?"8–10 h":"About "+hoursText(step.hours)} · {step.distance} km · {step.carbon.toLocaleString()} g CO₂</p>
+        {step.routeName&&<p className="text-xs mt-1 font-bold text-indigo-700">🛣️ {step.routeName}</p>}
+        {step.routeWarning&&<p className="text-xs mt-1 font-bold text-amber-700">⚠ {step.routeWarning}</p>}
         {isMatsuFerry(step.from,step.to,step.transport)&&<p style={{color:"#b91c1c",fontWeight:800}}>⚠ {FERRY_WARNING}</p>}
       </button>)}
     </div>
@@ -478,7 +528,7 @@ export default function App() {
   };
 
   const checkTransportAvailability = (routeInfo: ReturnType<typeof getRouteInfo>, transportId: string) =>
-    routeInfo ? routeEstimate(routeInfo.from,routeInfo.to,transportId) : {disabled:true,reason:"Choose places first.",hours:0};
+    routeInfo ? routeEstimate(routeInfo.from,routeInfo.to,transportId) : {disabled:true,reason:"Choose places first.",hours:0,routeName:"",routeWarning:""};
 
 
   const handlePlaceToggle = (place: string) => {
@@ -533,7 +583,9 @@ export default function App() {
         transport: transId,
         distance: estimate?.distance??routeInfo.distance,
         hours: estimate?.hours??0,
-        carbon: stepCarbon
+        carbon: stepCarbon,
+        routeName: estimate?.routeName??"",
+        routeWarning: estimate?.routeWarning??""
       });
     }
     return { totalCarbon: total, totalHours, steps };
@@ -703,7 +755,7 @@ export default function App() {
                             {Object.values(TRANSPORT_DATA).map((info) => {
                               const Icon = info.icon;
                               const active = itinerary[index] === info.id;
-                              const { disabled, reason, hours } = checkTransportAvailability(routeInfo, info.id);
+                              const { disabled, reason, hours, routeName, routeWarning } = checkTransportAvailability(routeInfo, info.id);
                               
                               return (
                                 <button
@@ -731,6 +783,8 @@ export default function App() {
                                     {info.value} g CO₂/km · estimate
                                   </div>
                                   {!disabled&&(isMatsuFerry(routeInfo.from,routeInfo.to,info.id)?<p style={{color:"#b91c1c",fontWeight:800}}>⚠ {FERRY_WARNING}</p>:<p className="text-sm font-bold text-blue-700">About {hoursText(hours)}</p>)}
+                                  {!disabled&&routeName&&<p className="text-xs font-bold text-indigo-700">🛣️ {routeName}</p>}
+                                  {!disabled&&routeWarning&&<p className="text-xs font-bold text-amber-700">⚠ {routeWarning}</p>}
                                   {disabled && (
                                     <div className="text-xs text-slate-600 leading-relaxed">
                                       {reason || "Please choose a practical way."}
@@ -764,18 +818,22 @@ export default function App() {
                   {currentPlanDetails.steps.map((step,i)=><p key={i} className="bg-white rounded-lg p-3">
                     <strong>Day {i+1}: {step.from} → {step.to}</strong><br/>
                     {step.transport ? TRANSPORT_DATA[step.transport].label+" · "+(isMatsuFerry(step.from,step.to,step.transport)?"8–10 h":"About "+hoursText(step.hours)) : "Choose your transport."}
+                    {step.transport&&step.routeName&&<span className="block text-xs font-bold text-indigo-700 mt-1">🛣️ {step.routeName}</span>}
+                    {step.transport&&step.routeWarning&&<span className="block text-xs font-bold text-amber-700 mt-1">⚠ {step.routeWarning}</span>}
                     {step.transport&&isMatsuFerry(step.from,step.to,step.transport)&&<span style={{display:"block",color:"#b91c1c",fontWeight:800}}>⚠ {FERRY_WARNING}</span>}
                   </p>)}
                 </div>
                 <p className="text-sm mt-3">一般每段交通估計最多 {MAX_LEG_HOURS} 小時（基隆—馬祖渡輪例外），保留遊覽與休息時間。步行每天最多 30 km、單車每天最多 80 km，分日判斷，不累加限制四天總里程。</p>
                 <p className="text-sm mt-2">航空：Matsu ↔ Taipei / Taichung / Kaohsiung；Penghu / Kinmen ↔ Taipei / Taichung / Chiayi / Tainan / Kaohsiung；Penghu ↔ Kinmen 亦可搭飛機。</p>
                 <p className="text-sm mt-2">渡輪：Chiayi / Kaohsiung ↔ Penghu；Keelung（基隆港）↔ Matsu。基隆—馬祖渡輪特例開放，運行時間約 8 至 10 小時。金門在本活動中沒有渡輪連線。</p>
+                <p className="text-sm mt-2">陸路廊道：Taipei ↔ Yilan 走國道 5 號；Taoyuan ↔ Yilan 走北橫；Taichung ↔ Hualien 以台 8、台 14 甲與國道 6 號組成山區路線；Pingtung / Kaohsiung / Tainan ↔ Taitung 預設走南迴台 9 線。火車仍沿鐵路環繞，不會穿越中央山脈。</p>
               </div>}
               <details className="text-sm text-slate-600 rounded-xl border p-4">
                 <summary className="font-bold cursor-pointer">Teacher notes · 課堂估算說明</summary>
                 <p className="mt-3">這是交通可行性的入門檢核，未查詢即時班次、天氣、接駁銜接與路況。飛機預留 1.5 小時供報到及市區接駁；渡輪時間含港口接駁與登船。渡輪港口接駁碳排以公車估算。</p>
                 <p className="mt-2">碳排沿用原課堂係數；新增 Ferry 暫用 120 g CO₂／人公里作教學假設，非官方實測值。步行與單車的 0 僅指使用階段。比較須同時考量距離、時間與交通是否可行。</p>
                 <p className="mt-2">四天行程分日檢核，每天交通最多 {MAX_LEG_HOURS} 小時（基隆—馬祖渡輪例外）；每天步行示範上限 30 km、單車 80 km，不是六年級學生實際出遊建議。教師可修改 MAX_LEG_HOURS 與 routeEstimate 設定。</p>
+                <p className="mt-2">公車與汽車的橫向路線採固定教學廊道，並非即時導航。中橫西段不是一般遊客可完整直通的道路，因此 Hualien ↔ Taichung 不畫成完整台 8 線；南橫台 20 線受管制影響，也不作為預設路線。實際出發前仍須查詢官方即時路況。</p>
                 <a className="underline block mt-2" href="https://www.penghu-nsa.gov.tw/ChiHoOneLer/transport/Traffic/Traffic/ship01.htm" target="_blank" rel="noopener noreferrer">澎湖國家風景區：輪船資訊（船班與季節另查）</a>
               </details>
               {/* Action Button */}
@@ -1001,3 +1059,6 @@ export default function App() {
     </div>
   );
 }
+
+// Named exports support automated classroom-route checks without changing the UI.
+export { routeEstimate, illustrativePath };
