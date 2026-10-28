@@ -342,15 +342,60 @@ function loadSvgImage(svg:string):Promise<HTMLImageElement>{
   img.onerror=()=>{URL.revokeObjectURL(url);reject(new Error("地圖影像載入失敗。"));};img.src=url;
  });
 }
+
+function recordTripCanvas(canvas:HTMLCanvasElement,draw:(time:number)=>void,seconds:number,mimeType:string,stopped:()=>boolean,onProgress:(n:number)=>void):Promise<Blob>{
+ return new Promise((resolve,reject)=>{
+  let stream:MediaStream|undefined,recorder:MediaRecorder|undefined,timer=0,deadline=0,settled=false;
+  const chunks:Blob[]=[];
+  const cleanup=()=>{window.clearTimeout(timer);window.clearTimeout(deadline);document.removeEventListener("visibilitychange",hidden);stream?.getTracks().forEach(track=>track.stop());};
+  const fail=(error:Error)=>{if(settled)return;settled=true;if(recorder?.state!=="inactive"){try{recorder?.stop();}catch{}}cleanup();reject(error);};
+  const hidden=()=>{if(document.hidden)fail(new Error("影片製作已中斷，請保持此分頁開啟、不要鎖定螢幕，再重新製作。"));};
+  try{
+   draw(0);
+   stream=canvas.captureStream(24);
+   recorder=new MediaRecorder(stream,{mimeType,videoBitsPerSecond:4000000});
+   recorder.ondataavailable=event=>{if(event.data.size)chunks.push(event.data);};
+   recorder.onerror=()=>fail(new Error("此裝置錄製失敗，請使用更新版 Safari 重試，或以 iPad 螢幕錄影錄下 Play My Trip。"));
+   recorder.onstop=()=>{
+    if(settled)return;
+    settled=true;
+    const type=recorder?.mimeType||mimeType;
+    cleanup();
+    const blob=new Blob(chunks,{type});
+    if(stopped())reject(new Error("已取消製作。"));
+    else if(!blob.size)reject(new Error("沒有錄到影片，請保持網頁開啟後重試。"));
+    else resolve(blob);
+   };
+   document.addEventListener("visibilitychange",hidden);
+   recorder.onstart=()=>{
+    const start=performance.now();
+    const tick=()=>{
+     if(settled)return;
+     if(stopped()){fail(new Error("已取消製作。"));return;}
+     try{
+      const elapsed=Math.min(seconds,(performance.now()-start)/1000);
+      draw(elapsed);onProgress(Math.min(99,Math.floor(elapsed/seconds*100)));
+      if(elapsed>=seconds){recorder!.stop();return;}
+      timer=window.setTimeout(tick,1000/24);
+     }catch(error){fail(error instanceof Error?error:new Error("影片繪製失敗。"));}
+    };
+    tick();
+   };
+   deadline=window.setTimeout(()=>fail(new Error("影片製作逾時，請保持畫面開啟後重試。")),(seconds+20)*1000);
+   recorder.start();
+  }catch(error){fail(error instanceof Error?error:new Error("此瀏覽器無法錄製影片。"));}
+ });
+}
+
 function TripVideoExporter({steps,teamName,mapRef}:{steps:TripStep[];teamName:string;mapRef:React.RefObject<SVGSVGElement|null>}){
  const [busy,setBusy]=useState(false),[progress,setProgress]=useState(0),[error,setError]=useState("");
- const [url,setUrl]=useState("");
+ const [url,setUrl]=useState(""),[videoFile,setVideoFile]=useState<File|null>(null),[sharing,setSharing]=useState(false);
  const stopped=useRef(false),running=useRef(false),savedUrl=useRef("");
  useEffect(()=>()=>{stopped.current=true;if(savedUrl.current)URL.revokeObjectURL(savedUrl.current);},[]);
  async function create(){
   if(running.current||!mapRef.current)return;
   running.current=true;stopped.current=false;setBusy(true);setProgress(0);setError("");
-  if(savedUrl.current)URL.revokeObjectURL(savedUrl.current);savedUrl.current="";setUrl("");
+  if(savedUrl.current)URL.revokeObjectURL(savedUrl.current);savedUrl.current="";setUrl("");setVideoFile(null);
   try{
    const clone=mapRef.current.cloneNode(true) as SVGSVGElement;
    clone.removeAttribute("style");clone.setAttribute("width","760");clone.setAttribute("height","810");clone.setAttribute("font-family","Arial, sans-serif");
@@ -361,9 +406,8 @@ function TripVideoExporter({steps,teamName,mapRef}:{steps:TripStep[];teamName:st
    const ctx=canvas.getContext("2d");if(!ctx)throw new Error("Canvas unavailable");
    const paths=steps.map(illustrativePath),fps=12,duration=steps.length*6,frames:Uint8Array[]=[];
    const scale=640/760;
-   for(let frame=0;frame<(duration+2)*fps;frame++){
-    if(stopped.current)return;
-    const time=frame/fps,day=Math.min(steps.length-1,Math.floor(time/6)),fraction=time>=duration?1:Math.min(1,(time%6)/5);
+   const draw=(time:number)=>{
+    const day=Math.min(steps.length-1,Math.floor(time/6)),fraction=time>=duration?1:Math.min(1,(time%6)/5);
     ctx.fillStyle="#eff6ff";ctx.fillRect(0,0,1280,720);ctx.drawImage(base,0,18,640,810*scale);
     if(time<duration){
      const [x,y]=project(pointAlong(paths[day],fraction)),mode=movingMode(steps[day],fraction);
@@ -390,28 +434,62 @@ function TripVideoExporter({steps,teamName,mapRef}:{steps:TripStep[];teamName:st
     });
     ctx.fillStyle="#047857";ctx.font="bold 25px Arial";ctx.fillText("Total carbon: "+steps.reduce((sum,s)=>sum+s.carbon,0).toLocaleString()+" g CO₂",675,643);
     ctx.fillStyle="#475569";ctx.font="15px Arial";ctx.fillText("Classroom estimates · Illustrative routes · No audio",675,688);
-    frames.push(await encodeVP8(canvas));
-    if(frame%4===0){setProgress(Math.floor((frame+1)/((duration+2)*fps)*100));await new Promise(resolve=>window.setTimeout(resolve,0));}
+   };
+   const canRecord=typeof MediaRecorder!=="undefined"&&typeof canvas.captureStream==="function";
+   const mp4=canRecord?['video/mp4;codecs=avc1.42E01E','video/mp4'].find(type=>MediaRecorder.isTypeSupported(type)):undefined;
+   let blob:Blob;
+   if(mp4){
+    blob=await recordTripCanvas(canvas,draw,duration+2,mp4,()=>stopped.current,setProgress);
+   }else{
+    draw(0);
+    let first:Uint8Array|undefined;
+    try{first=await encodeVP8(canvas);}catch{
+     const recordingType=canRecord?['video/webm;codecs=vp8','video/webm'].find(type=>MediaRecorder.isTypeSupported(type)):undefined;
+     if(!recordingType)throw new Error("此 iPad／瀏覽器不支援影片匯出，請更新 iPadOS 並用 Safari 開啟，或使用螢幕錄影錄下 Play My Trip。");
+     blob=await recordTripCanvas(canvas,draw,duration+2,recordingType,()=>stopped.current,setProgress);
+    }
+    if(first){
+     frames.push(first);
+     for(let frame=1;frame<(duration+2)*fps;frame++){
+      if(stopped.current)return;
+      draw(frame/fps);frames.push(await encodeVP8(canvas));
+      if(frame%4===0){setProgress(Math.floor((frame+1)/((duration+2)*fps)*100));await new Promise(resolve=>window.setTimeout(resolve,0));}
+     }
+     blob=webmFromFrames(frames,fps,1280,720);
+    }
    }
    if(stopped.current)return;
-   const result=URL.createObjectURL(webmFromFrames(frames,fps,1280,720));savedUrl.current=result;setUrl(result);setProgress(100);
+   const extension=blob!.type.includes("mp4")?"mp4":"webm";
+   const file=new File([blob!],"Our_Own_Trip_"+(teamName.replace(/[^a-zA-Z0-9_-]/g,"_")||"Team")+"."+extension,{type:extension==="mp4"?"video/mp4":"video/webm"});
+   const result=URL.createObjectURL(file);savedUrl.current=result;setUrl(result);setVideoFile(file);setProgress(100);
   }catch(e){if(!stopped.current)setError(e instanceof Error?e.message:"影片匯出失敗。");}
   finally{running.current=false;setBusy(false);}
  }
+ async function shareVideo(){
+  if(!videoFile||sharing)return;
+  setSharing(true);setError("");
+  try{await navigator.share({files:[videoFile],title:"Our Taiwan Trip"});}
+  catch(error){if(!(error instanceof DOMException&&error.name==="AbortError"))setError("無法開啟分享選單，請改按 Download Video 或開啟影片後儲存至「檔案」。");}
+  finally{setSharing(false);}
+ }
+ const canShare=!!videoFile&&typeof navigator.share==="function"&&typeof navigator.canShare==="function"&&navigator.canShare({files:[videoFile]});
  const button="rounded-xl px-4 py-3 font-bold border-2 border-blue-300 bg-white text-blue-900";
  return <div className="space-y-3">
   <div className="flex flex-wrap gap-3">
    <button className={button} disabled={busy} onClick={create}>{busy?"Preparing video… "+progress+"%":"🎬 Create Trip Video"}</button>
    {busy&&<button className={button} onClick={()=>{stopped.current=true;}}>Cancel export</button>}
-   {url&&<a className={button} href={url} download={"Our_Own_Trip_"+(teamName.replace(/[^a-zA-Z0-9_-]/g,"_")||"Team")+".webm"}>⬇ Download Video (WebM)</a>}
+   {url&&videoFile&&<a className={button} href={url} download={videoFile.name}>⬇ Download Video ({videoFile.type==="video/mp4"?"MP4":"WebM"})</a>}
+   {canShare&&<button className={button} disabled={sharing} onClick={shareVideo}>↗ Share / Save Video · 分享／儲存影片</button>}
+   {url&&<a className={button} href={url} target="_blank" rel="noopener noreferrer">▶ Open Video · 開啟影片</a>}
   </div>
-  <p className="text-sm text-slate-600">製作 26 秒、1280 × 720 的無聲 WebM 影片，包含四天路線、交通動畫、英文句子與總碳排。按 Create Trip Video，完成後按 Download Video。建議用桌面 Chrome 或 Edge。</p>
+  <p className="text-sm text-slate-600">製作約 26 秒、1280 × 720 的無聲影片，包含四天路線、交通動畫、英文句子與總碳排。支援時優先輸出 MP4，其他瀏覽器使用 WebM。iPad 建議用 Safari；製作時請保持此分頁開啟，不要切換 App 或鎖定螢幕。完成後可下載，或按「分享／儲存影片」儲存至「檔案」，再上傳 Padlet。</p>
   <div className="rounded-xl border-2 border-emerald-300 bg-emerald-50 p-4 space-y-2">
    <p className="font-bold text-emerald-900">📮 Share Your Trip Video · 分享你們的旅行影片</p>
-   <p className="text-sm text-emerald-900">先按 Download Video 儲存影片，再前往 Padlet 新增貼文，上傳影片並填上小組名稱。</p>
+   <p className="text-sm text-emerald-900">先按 Download Video 或「分享／儲存影片」儲存影片，再前往 Padlet 新增貼文，上傳影片並填上小組名稱。</p>
    <a className="inline-flex items-center justify-center rounded-xl bg-emerald-700 px-4 py-3 font-bold text-white hover:bg-emerald-800 focus-visible:outline focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-emerald-700" href="https://padlet.com/pyps115/my-low-carbon-taiwan-trip-s024tpz6ri25cys3mju9" target="_blank" rel="noopener noreferrer">↗ Post to Padlet · 前往 Padlet 張貼影片</a>
    <p className="text-xs text-emerald-800">另開新分頁，保留目前的旅行成果。</p>
   </div>
+  {url&&<video className="w-full max-w-2xl rounded-xl bg-black" src={url} controls playsInline preload="metadata" aria-label="匯出影片預覽" />}
   {error&&<p role="alert" style={{color:"#b91c1c",fontWeight:800}}>{error}</p>}
  </div>;
 }
