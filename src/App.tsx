@@ -124,6 +124,7 @@ function illustrativePath(step: TripStep): GeoPoint[] {
   const profile=routeProfile(step.from,step.to,step.transport);
   if(profile?.path.length)return profile.path;
   if (step.transport === "ferry") {
+    if (a.island && b.island) return [start,end];
     const mainland = a.island ? step.to : step.from;
     const sea: GeoPoint[] = mainland === "Chiayi"
       ? [[CITIES.Chiayi.lat,CITIES.Chiayi.lng],[23.379,120.158],[23.38,119.98],[23.49,119.55],[23.565,119.566]]
@@ -177,6 +178,7 @@ const FERRY_HOURS: Record<string,number> = {
   [pair("Keelung","Matsu")]: 9 // 8–10 小時的課堂中間值，特例開放
 };
 const isMatsuFerry=(from:string,to:string,mode:string)=>mode==="ferry"&&pair(from,to)===pair("Keelung","Matsu");
+const isInterIslandFerry=(from:string,to:string,mode:string)=>mode==="ferry"&&from!==to&&!!CITIES[from].island&&!!CITIES[to].island;
 const FERRY_WARNING="運行時間約 8 至 10 小時";
 function routeEstimate(from:string,to:string,transport:string) {
   const a=CITIES[from], b=CITIES[to];
@@ -187,8 +189,8 @@ function routeEstimate(from:string,to:string,transport:string) {
     if(!island || !PLANE_GATEWAYS[island]?.includes(gateway))
       reason="No direct flight in this activity. Try Taipei, Taichung or Kaohsiung. 本活動未提供這條直飛路線。";
   } else if(transport==="ferry") {
-    if(FERRY_HOURS[pair(from,to)]===undefined)
-      reason="Ferry ports: Chiayi / Kaohsiung ↔ Penghu; Keelung ↔ Matsu. 請先到有渡輪的港口城市。";
+    if(!isInterIslandFerry(from,to,transport)&&FERRY_HOURS[pair(from,to)]===undefined)
+      reason="Ferry routes: Penghu ↔ Kinmen ↔ Matsu; Chiayi / Kaohsiung ↔ Penghu; Keelung ↔ Matsu. 外島間開放課堂模擬渡輪；本島請選有渡輪的港口城市。";
   } else if(a.island || b.island) {
     reason="We must cross the sea. Choose a plane or ferry. 跨海不能步行、騎車或搭火車。";
   } else if(transport==="hsr" && (!a.hasHSR || !b.hasHSR)) {
@@ -203,13 +205,13 @@ function routeEstimate(from:string,to:string,transport:string) {
   const speed:Record<string,number>={foot:4,bike:12,car:60,bus:45,train:70,hsr:180,plane:450,ferry:35};
   const overhead:Record<string,number>={foot:0,bike:0,car:0.25,bus:0.5,train:0.5,hsr:0.75,plane:1.5,ferry:1};
   const corridorSpeed=transport==="car"?profile?.carSpeed:transport==="bus"?profile?.busSpeed:undefined;
-  const hours=transport==="ferry" ? FERRY_HOURS[pair(from,to)]??99 : distance/(corridorSpeed??speed[transport])+overhead[transport];
+  const hours=transport==="ferry" ? FERRY_HOURS[pair(from,to)]??(isInterIslandFerry(from,to,transport)?distance/speed.ferry+overhead.ferry:99) : distance/(corridorSpeed??speed[transport])+overhead[transport];
   if(!reason && transport==="foot" && distance>30) reason="Too far to walk in our day trip (30 km max). 一日步行上限 30 公里。";
   if(!reason && transport==="bike" && distance>80) reason="Too far to cycle in our day trip (80 km max). 一日騎車上限 80 公里。";
-  if(!reason && hours>MAX_LEG_HOURS && !isMatsuFerry(from,to,transport))reason="Too long for this day. 這段超過每日 8 小時交通上限。";
-  const transferKm=transport==="ferry" ? length(a.island?path.slice(-2):path.slice(0,2)) : 0;
+  if(!reason && hours>MAX_LEG_HOURS && transport!=="bus" && !isInterIslandFerry(from,to,transport) && !isMatsuFerry(from,to,transport))reason="Too long for this day. 這段超過每日 8 小時交通上限。";
+  const transferKm=transport==="ferry" && !isInterIslandFerry(from,to,transport) ? length(a.island?path.slice(-2):path.slice(0,2)) : 0;
   const carbon=Math.round(Math.max(0,distance-transferKm)*TRANSPORT_DATA[transport].value+transferKm*TRANSPORT_DATA.bus.value);
-  return {disabled:!!reason,reason,distance,hours,carbon,routeName:transport==="ferry"?"Ferry and port transfer":profile?.name??"Illustrative route",routeWarning:profile?.warning??""};
+  return {disabled:!!reason,reason,distance,hours,carbon,routeName:transport==="ferry"?(isInterIslandFerry(from,to,transport)?"Inter-island ferry · Classroom simulation":"Ferry and port transfer"):profile?.name??"Illustrative route",routeWarning:isInterIslandFerry(from,to,transport)?"Classroom simulation, not a scheduled service. 外島間航線為課堂模擬，非實際定期船班。":profile?.warning??""};
 }
 const hoursText=(n:number)=>Math.round(n*60/5)*5<60
   ? Math.round(n*60/5)*5+" min"
@@ -823,16 +825,16 @@ export default function App() {
                     {step.transport&&isMatsuFerry(step.from,step.to,step.transport)&&<span style={{display:"block",color:"#b91c1c",fontWeight:800}}>⚠ {FERRY_WARNING}</span>}
                   </p>)}
                 </div>
-                <p className="text-sm mt-3">一般每段交通估計最多 {MAX_LEG_HOURS} 小時（基隆—馬祖渡輪例外），保留遊覽與休息時間。步行每天最多 30 km、單車每天最多 80 km，分日判斷，不累加限制四天總里程。</p>
+                <p className="text-sm mt-3">一般每段交通估計最多 {MAX_LEG_HOURS} 小時（公車、外島間模擬渡輪及基隆—馬祖渡輪不受此限），保留遊覽與休息時間。步行每天最多 30 km、單車每天最多 80 km，分日判斷，不累加限制四天總里程。</p>
                 <p className="text-sm mt-2">航空：Matsu ↔ Taipei / Taichung / Kaohsiung；Penghu / Kinmen ↔ Taipei / Taichung / Chiayi / Tainan / Kaohsiung；Penghu ↔ Kinmen 亦可搭飛機。</p>
-                <p className="text-sm mt-2">渡輪：Chiayi / Kaohsiung ↔ Penghu；Keelung（基隆港）↔ Matsu。基隆—馬祖渡輪特例開放，運行時間約 8 至 10 小時。金門在本活動中沒有渡輪連線。</p>
+                <p className="text-sm mt-2">渡輪：Chiayi / Kaohsiung ↔ Penghu；Keelung（基隆港）↔ Matsu。基隆—馬祖渡輪特例開放，運行時間約 8 至 10 小時。澎湖、金門、馬祖彼此開放課堂模擬渡輪，不受每日 8 小時限制；時間依距離與模擬船速估算，非實際定期船班。</p>
                 <p className="text-sm mt-2">陸路廊道：Taipei ↔ Yilan 走國道 5 號；Taoyuan ↔ Yilan 走北橫；Taichung ↔ Hualien 以台 8、台 14 甲與國道 6 號組成山區路線；Pingtung / Kaohsiung / Tainan ↔ Taitung 預設走南迴台 9 線。火車仍沿鐵路環繞，不會穿越中央山脈。</p>
               </div>}
               <details className="text-sm text-slate-600 rounded-xl border p-4">
                 <summary className="font-bold cursor-pointer">Teacher notes · 課堂估算說明</summary>
                 <p className="mt-3">這是交通可行性的入門檢核，未查詢即時班次、天氣、接駁銜接與路況。飛機預留 1.5 小時供報到及市區接駁；渡輪時間含港口接駁與登船。渡輪港口接駁碳排以公車估算。</p>
                 <p className="mt-2">碳排沿用原課堂係數；新增 Ferry 暫用 120 g CO₂／人公里作教學假設，非官方實測值。步行與單車的 0 僅指使用階段。比較須同時考量距離、時間與交通是否可行。</p>
-                <p className="mt-2">四天行程分日檢核，每天交通最多 {MAX_LEG_HOURS} 小時（基隆—馬祖渡輪例外）；每天步行示範上限 30 km、單車 80 km，不是六年級學生實際出遊建議。教師可修改 MAX_LEG_HOURS 與 routeEstimate 設定。</p>
+                <p className="mt-2">四天行程分日檢核，每天交通最多 {MAX_LEG_HOURS} 小時（公車、外島間模擬渡輪及基隆—馬祖渡輪不受此限）；每天步行示範上限 30 km、單車 80 km，不是六年級學生實際出遊建議。教師可修改 MAX_LEG_HOURS 與 routeEstimate 設定。</p>
                 <p className="mt-2">公車與汽車的橫向路線採固定教學廊道，並非即時導航。中橫西段不是一般遊客可完整直通的道路，因此 Hualien ↔ Taichung 不畫成完整台 8 線；南橫台 20 線受管制影響，也不作為預設路線。實際出發前仍須查詢官方即時路況。</p>
                 <a className="underline block mt-2" href="https://www.penghu-nsa.gov.tw/ChiHoOneLer/transport/Traffic/Traffic/ship01.htm" target="_blank" rel="noopener noreferrer">澎湖國家風景區：輪船資訊（船班與季節另查）</a>
               </details>
