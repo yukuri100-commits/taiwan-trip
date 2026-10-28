@@ -406,6 +406,12 @@ function TripVideoExporter({steps,teamName,mapRef}:{steps:TripStep[];teamName:st
    {url&&<a className={button} href={url} download={"Our_Own_Trip_"+(teamName.replace(/[^a-zA-Z0-9_-]/g,"_")||"Team")+".webm"}>⬇ Download Video (WebM)</a>}
   </div>
   <p className="text-sm text-slate-600">製作 26 秒、1280 × 720 的無聲 WebM 影片，包含四天路線、交通動畫、英文句子與總碳排。按 Create Trip Video，完成後按 Download Video。建議用桌面 Chrome 或 Edge。</p>
+  <div className="rounded-xl border-2 border-emerald-300 bg-emerald-50 p-4 space-y-2">
+   <p className="font-bold text-emerald-900">📮 Share Your Trip Video · 分享你們的旅行影片</p>
+   <p className="text-sm text-emerald-900">先按 Download Video 儲存影片，再前往 Padlet 新增貼文，上傳影片並填上小組名稱。</p>
+   <a className="inline-flex items-center justify-center rounded-xl bg-emerald-700 px-4 py-3 font-bold text-white hover:bg-emerald-800 focus-visible:outline focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-emerald-700" href="https://padlet.com/pyps115/my-low-carbon-taiwan-trip-s024tpz6ri25cys3mju9" target="_blank" rel="noopener noreferrer">↗ Post to Padlet · 前往 Padlet 張貼影片</a>
+   <p className="text-xs text-emerald-800">另開新分頁，保留目前的旅行成果。</p>
+  </div>
   {error&&<p role="alert" style={{color:"#b91c1c",fontWeight:800}}>{error}</p>}
  </div>;
 }
